@@ -1,0 +1,129 @@
+---
+
+- name: Kill all running instances of keepassxc
+  become: true
+  ansible.builtin.command:
+    cmd: killall keepassxc
+  ignore_errors: true
+
+- name: Add KeePassXC PPA
+  become: true
+  ansible.builtin.apt_repository:
+    repo: ppa:phoerious/keepassxc
+    state: present
+
+- name: Install KeePassXC
+  become: true
+  ansible.builtin.apt:
+    name: keepassxc
+    state: present
+    
+- name: Delete database if it already exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ keepass_database }}"
+    state: absent
+
+- name: Create Database
+  become: true
+  become_user: '{{ keepass_user }}'
+  ansible.builtin.shell:
+    cmd: >
+      { echo "{{ keepass_password }}"; echo "{{ keepass_password | default('y') }}"; } | keepassxc-cli db-create {{ keepass_database }} --set-password
+
+- name: Create Entries
+  become: true
+  become_user: '{{ keepass_user }}'
+  ansible.builtin.shell:
+    cmd: >
+      { echo "{{ keepass_password }}"; echo "{{ item.password }}"; } | keepassxc-cli add {{ keepass_database }} --username "{{ item.username }}" --url "{{ item.url | default('') }}" -p "{{ item.entry_name }}" --notes "{{ item.notes | default('') }}"
+  loop: "{{ keepass_entries }}"
+
+- name: Remove keepass cache
+  become: true
+  ansible.builtin.file:
+    path: /home/{{ keepass_user }}/.cache/keepassxc
+    state: absent
+
+- name: Create Directories for KeePassXC config
+  become: true
+  ansible.builtin.file:
+    path: /home/{{ keepass_user }}/{{ item }}/
+    state: directory
+    owner: '{{ keepass_user }}'
+    group: '{{ keepass_user }}'
+    recurse: true
+  with_items:
+    - .config/autostart
+    - .config/keepassxc
+    - .cache/keepassxc
+    - .mozilla/native-messaging-hosts
+
+- name: Upload KeePassXC Config File
+  become: true
+  ansible.builtin.template:
+    dest: /home/{{ keepass_user }}/{{ item }}/keepassxc/keepassxc.ini
+    src: templates/keepassxc.ini.j2
+    owner: '{{ keepass_user }}'
+    group: '{{ keepass_user }}'
+  with_items:
+    - .config
+    - .cache
+
+- name: Upload keepassxc_browser.json
+  become: true
+  ansible.builtin.copy:
+    dest: /home/{{ keepass_user }}/.mozilla/native-messaging-hosts/org.keepassxc.keepassxc_browser.json
+    src: files/org.keepassxc.keepassxc_browser.json
+    owner: '{{ keepass_user }}'
+    group: '{{ keepass_user }}'
+
+- name: Upload KeePassXC unlock-Script
+  become: true
+  ansible.builtin.template:
+    dest: "{{ keepass_unlock_script_location }}/.ait-unlock-keepassxc.sh"
+    src: templates/unlock-script.sh.j2
+    owner: '{{ keepass_user }}'
+    group: '{{ keepass_user }}'
+    mode: 0755
+
+- name: Add unlock-Script to autostart
+  become: true
+  ansible.builtin.template:
+    dest: /home/{{ keepass_user }}/.config/autostart/ait-unlock-keepassxc.desktop
+    src: templates/unlock-desktopfile.j2
+    owner: '{{ keepass_user }}'
+    group: '{{ keepass_user }}'
+    mode: 0755
+
+# Install Addon on firefox
+
+- name: Read the JSON file
+  become: true
+  ansible.builtin.slurp:
+    src: /etc/firefox/policies/policies.json
+  register: json_file_content
+
+- name: Decode the JSON content
+  ansible.builtin.set_fact:
+    policies_json: "{{ json_file_content['content'] | b64decode | from_json }}"
+
+- name: Ensure policies.Extensions.Install is a list
+  ansible.builtin.set_fact:
+    policies_json: >
+      {{
+        policies_json | combine({
+          'policies': policies_json.policies | default({}) | combine({
+            'Extensions': policies_json.policies.Extensions | default({}) | combine({
+              'Install': ((policies_json.policies.Extensions.Install | default([])) + [ keepass_xpi_url ]) | unique
+            })
+          })
+        })
+      }}
+
+- name: Write updated JSON back to file
+  become: true
+  ansible.builtin.copy:
+    content: "{{ policies_json | to_nice_json }}"
+    dest: /etc/firefox/policies/policies.json
+    mode: '0644'
