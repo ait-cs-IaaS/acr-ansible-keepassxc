@@ -1,11 +1,5 @@
 ---
 
-- name: Kill all running instances of keepassxc
-  become: true
-  ansible.builtin.command:
-    cmd: killall keepassxc
-  ignore_errors: true
-
 - name: Add KeePassXC PPA
   become: true
   ansible.builtin.apt_repository:
